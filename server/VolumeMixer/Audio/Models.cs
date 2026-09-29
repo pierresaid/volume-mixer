@@ -11,6 +11,7 @@ public record MixerSnapshot(
     MasterState Master,
     bool? MicMuted,
     string? MicName,
+    IReadOnlyList<string> MicUsers,
     IReadOnlyList<DeviceInfo> Devices,
     IReadOnlyList<AppState> Apps);
 

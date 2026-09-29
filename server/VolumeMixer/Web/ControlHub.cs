@@ -21,6 +21,7 @@ public class ControlHub(AudioWorker worker, MediaService media, ConnectionTracke
     public override Task OnDisconnectedAsync(Exception? exception)
     {
         tracker.OnLeft();
+        worker.SetMicMeterWanted(Context.ConnectionId, false);
         return base.OnDisconnectedAsync(exception);
     }
 
@@ -36,6 +37,8 @@ public class ControlHub(AudioWorker worker, MediaService media, ConnectionTracke
 
     public void SetMicMuted(bool muted) => worker.SetMicMuted(muted);
 
+    public void SetMicMeter(bool wanted) => worker.SetMicMeterWanted(Context.ConnectionId, wanted);
+
     public void SetDefaultDevice(string deviceId) => worker.SetDefaultDevice(deviceId);
 
     public Task MediaPlayPause() => media.PlayPauseAsync();
@@ -49,6 +52,6 @@ public class ControlHub(AudioWorker worker, MediaService media, ConnectionTracke
     private async Task<object> ComposeSnapshotAsync()
     {
         var s = await worker.GetSnapshotAsync();
-        return new { s.MachineName, s.Master, s.MicMuted, s.MicName, s.Devices, s.Apps, Media = media.CurrentWithFreshPosition };
+        return new { s.MachineName, s.Master, s.MicMuted, s.MicName, s.MicUsers, s.Devices, s.Apps, Media = media.CurrentWithFreshPosition };
     }
 }

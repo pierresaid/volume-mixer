@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 using NAudio.CoreAudioApi.Interfaces;
+using NAudio.Wave;
 
 namespace VolumeMixer.Audio;
 
@@ -19,7 +20,11 @@ public sealed class AudioWorker : IDisposable
 
     private MMDeviceEnumerator? _enumerator;
     private MMDevice? _device;
+    private MMDevice? _commsDevice; // default communications output when it isn't _device: calls often play there
     private MMDevice? _mic;
+    private bool _micIsBluetooth;
+    private WasapiCapture? _micCapture;
+    private readonly HashSet<string> _micMeterWanted = new(); // connection ids showing the mic row
     private DeviceNotificationClient? _deviceNotifications;
     private readonly object _reinitLock = new();
     private bool _reinitScheduled;
@@ -44,11 +49,14 @@ public sealed class AudioWorker : IDisposable
     private bool? _micMuted;
     private string? _micName;
     private List<DeviceInfo> _devices = [];
+    private List<string> _micUsers = [];                                   // apps recording from the mic right now
+    private readonly Dictionary<int, string> _micUserNames = new();        // pid -> display name, for those apps
 
     public event Action<AppState>? AppUpserted;
     public event Action<string>? AppRemoved;
     public event Action<MasterState>? MasterChanged;
     public event Action<bool>? MicChanged;
+    public event Action<IReadOnlyList<string>>? MicUsersChanged;
     public event Action<IReadOnlyList<DeviceInfo>>? DevicesChanged;
     public event Action<PeakFrame>? PeaksReady;
     public event Action<MixerSnapshot>? SnapshotRefreshed;
@@ -75,7 +83,11 @@ public sealed class AudioWorker : IDisposable
     public Task<MixerSnapshot> GetSnapshotAsync()
     {
         var tcs = new TaskCompletionSource<MixerSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Post(() => tcs.TrySetResult(BuildSnapshot()));
+        Post(() =>
+        {
+            RefreshMicUsers(); // only polled while phones are connected, so it may be stale for the first one
+            tcs.TrySetResult(BuildSnapshot());
+        });
         return tcs.Task;
     }
 
@@ -113,6 +125,14 @@ public sealed class AudioWorker : IDisposable
                 _mic.AudioEndpointVolume.Mute = muted;
         }
         catch (Exception ex) { Debug.WriteLine($"[AudioWorker] mic mute failed: {ex.Message}"); }
+    });
+
+    /// <summary>A phone started or stopped showing the mic row (disconnect counts as stopped).</summary>
+    public void SetMicMeterWanted(string connectionId, bool wanted) => Post(() =>
+    {
+        if (wanted) _micMeterWanted.Add(connectionId);
+        else _micMeterWanted.Remove(connectionId);
+        UpdateMicCapture();
     });
 
     public void SetDefaultDevice(string deviceId) => Post(() =>
@@ -210,14 +230,17 @@ public sealed class AudioWorker : IDisposable
 
     private async Task PeakLoopAsync()
     {
-        // live meters: 10 Hz, and only while at least one phone is connected
+        // live meters: 10 Hz, and only while at least one phone is connected.
+        // Twice a second, also check who's recording from the mic (the mic row pops up during calls).
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(100));
+            var tick = 0;
             while (await timer.WaitForNextTickAsync(_cts.Token))
             {
-                if (_clientCount > 0)
-                    Post(CollectPeaks);
+                if (_clientCount == 0) continue;
+                Post(CollectPeaks);
+                if (++tick % 5 == 0) Post(RefreshMicUsers);
             }
         }
         catch (OperationCanceledException) { }
@@ -274,6 +297,7 @@ public sealed class AudioWorker : IDisposable
             _device = _enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
             _device.AudioEndpointVolume.OnVolumeNotification += OnEndpointVolumeNotification;
             _device.AudioSessionManager.OnSessionCreated += OnSessionCreated;
+            InitializeCommsDevice();
             InitializeMic();
             RefreshDeviceList(broadcast: false);
             RefreshMaster();
@@ -313,6 +337,7 @@ public sealed class AudioWorker : IDisposable
             _mic.AudioEndpointVolume.OnVolumeNotification += OnMicVolumeNotification;
             _micMuted = _mic.AudioEndpointVolume.Mute;
             try { _micName = _mic.FriendlyName; } catch { _micName = null; }
+            _micIsBluetooth = IsBluetooth(_mic);
         }
         catch
         {
@@ -320,6 +345,138 @@ public sealed class AudioWorker : IDisposable
             _micMuted = null;
             _micName = null;
         }
+        UpdateMicCapture();
+        RefreshMicUsers();
+    }
+
+    private void InitializeCommsDevice()
+    {
+        // call apps often play to the default *communications* output; when that's another
+        // device (speakers for music, headset for calls) its sessions are tracked too
+        try
+        {
+            if (_enumerator is null) return;
+            var comms = _enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Communications);
+            if (comms.ID == _device?.ID)
+            {
+                comms.Dispose();
+                return;
+            }
+            comms.AudioSessionManager.OnSessionCreated += OnSessionCreated;
+            _commsDevice = comms;
+        }
+        catch
+        {
+            _commsDevice = null;
+        }
+    }
+
+    /// <summary>
+    /// Which apps are recording from the mic right now (a call, a voice chat, ...), by name.
+    /// Our own meter stream doesn't count.
+    /// </summary>
+    private void RefreshMicUsers()
+    {
+        var users = new List<string>();
+        var activePids = new HashSet<int>();
+        if (_mic is not null)
+        {
+            try
+            {
+                var manager = _mic.AudioSessionManager;
+                manager.RefreshSessions();
+                var sessions = manager.Sessions;
+                for (var i = 0; i < sessions.Count; i++)
+                {
+                    try
+                    {
+                        var session = sessions[i];
+                        if (session.State != AudioSessionState.AudioSessionStateActive || session.IsSystemSoundsSession)
+                            continue;
+                        var pid = (int)session.GetProcessID;
+                        if (pid <= 4 || pid == Environment.ProcessId) continue;
+                        activePids.Add(pid);
+                        if (!_micUserNames.TryGetValue(pid, out var name))
+                        {
+                            using var process = Process.GetProcessById(pid);
+                            string? exePath = null;
+                            try { exePath = process.MainModule?.FileName; } catch { /* elevated/protected */ }
+                            name = _micUserNames[pid] = ResolveName(process, exePath);
+                        }
+                        if (!users.Contains(name)) users.Add(name);
+                    }
+                    catch { /* session or process went away mid-scan */ }
+                }
+            }
+            catch (Exception ex) { Debug.WriteLine($"[AudioWorker] mic session scan failed: {ex.Message}"); }
+        }
+
+        foreach (var pid in _micUserNames.Keys.Where(pid => !activePids.Contains(pid)).ToList())
+            _micUserNames.Remove(pid);
+
+        users.Sort(StringComparer.OrdinalIgnoreCase);
+        if (users.SequenceEqual(_micUsers)) return;
+        _micUsers = users;
+        if (!_suppressEvents) MicUsersChanged?.Invoke(users);
+    }
+
+    // PKEY_Device_EnumeratorName: "BTHHFENUM" (hands-free) / "BTHLEENUM" (LE audio) for Bluetooth
+    private static readonly PropertyKey EnumeratorNameKey = new(new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), 24);
+
+    private static bool IsBluetooth(MMDevice device)
+    {
+        try
+        {
+            return device.Properties[EnumeratorNameKey]?.Value is string name &&
+                   name.StartsWith("BTH", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// A capture endpoint's peak meter reads 0 unless some app has a stream open on it,
+    /// so while a phone shows the mic row we hold one open (samples discarded).
+    /// Never for Bluetooth mics: opening one flips the headset into call mode and the
+    /// music turns to phone quality. Those meters still move whenever a call app has the
+    /// mic open.
+    /// </summary>
+    private void UpdateMicCapture()
+    {
+        var want = _micMeterWanted.Count > 0 && _mic is not null && !_micIsBluetooth;
+        if (want == (_micCapture is not null)) return;
+        if (!want)
+        {
+            StopMicCapture();
+            return;
+        }
+
+        WasapiCapture? capture = null;
+        try
+        {
+            capture = new WasapiCapture(_mic);
+            capture.RecordingStopped += (_, e) =>
+            {
+                // mic unplugged, grabbed in exclusive mode, ...: drop it; the next demand
+                // change or device re-bind tries again
+                if (e.Exception is not null)
+                    Post(() => { if (_micCapture == capture) StopMicCapture(); });
+            };
+            capture.StartRecording();
+            _micCapture = capture;
+        }
+        catch (Exception ex)
+        {
+            // e.g. microphone access turned off in Windows privacy settings
+            Debug.WriteLine($"[AudioWorker] mic meter stream failed: {ex.Message}");
+            try { capture?.Dispose(); } catch { }
+        }
+    }
+
+    private void StopMicCapture()
+    {
+        var capture = _micCapture;
+        _micCapture = null;
+        try { capture?.Dispose(); } catch { }
     }
 
     private void TearDownDevice()
@@ -337,6 +494,14 @@ public sealed class AudioWorker : IDisposable
             _device = null;
         }
 
+        if (_commsDevice is not null)
+        {
+            try { _commsDevice.AudioSessionManager.OnSessionCreated -= OnSessionCreated; } catch { }
+            try { _commsDevice.Dispose(); } catch { }
+            _commsDevice = null;
+        }
+
+        StopMicCapture();
         if (_mic is not null)
         {
             try { _mic.AudioEndpointVolume.OnVolumeNotification -= OnMicVolumeNotification; } catch { }
@@ -399,27 +564,10 @@ public sealed class AudioWorker : IDisposable
         if (_device is null) return;
         try
         {
-            var manager = _device.AudioSessionManager;
-            manager.RefreshSessions();
-            var sessions = manager.Sessions;
             var seen = new HashSet<string>();
-
-            for (var i = 0; i < sessions.Count; i++)
-            {
-                AudioSessionControl control;
-                string id;
-                try
-                {
-                    control = sessions[i];
-                    id = control.GetSessionInstanceIdentifier;
-                }
-                catch { continue; }
-
-                if (SafeState(control) == AudioSessionState.AudioSessionStateExpired) continue;
-                seen.Add(id);
-                if (!_sessions.ContainsKey(id))
-                    TryAddSession(control);
-            }
+            ScanSessions(_device, seen);
+            if (_commsDevice is not null)
+                ScanSessions(_commsDevice, seen);
 
             foreach (var id in _sessions.Keys.Where(id => !seen.Contains(id)).ToList())
                 RemoveSession(id);
@@ -430,6 +578,30 @@ public sealed class AudioWorker : IDisposable
             RefreshMaster();
         }
         catch (Exception ex) { OnComFailure(ex); }
+    }
+
+    private void ScanSessions(MMDevice device, HashSet<string> seen)
+    {
+        var manager = device.AudioSessionManager;
+        manager.RefreshSessions();
+        var sessions = manager.Sessions;
+
+        for (var i = 0; i < sessions.Count; i++)
+        {
+            AudioSessionControl control;
+            string id;
+            try
+            {
+                control = sessions[i];
+                id = control.GetSessionInstanceIdentifier;
+            }
+            catch { continue; }
+
+            if (SafeState(control) == AudioSessionState.AudioSessionStateExpired) continue;
+            seen.Add(id);
+            if (!_sessions.ContainsKey(id))
+                TryAddSession(control);
+        }
     }
 
     private static AudioSessionState SafeState(AudioSessionControl control)
@@ -596,7 +768,7 @@ public sealed class AudioWorker : IDisposable
     }
 
     private MixerSnapshot BuildSnapshot() =>
-        new(Environment.MachineName, _master, _micMuted, _micName, _devices,
+        new(Environment.MachineName, _master, _micMuted, _micName, _micUsers, _devices,
             _apps.Values
                 .OrderBy(a => a.IsSystem ? 1 : 0)
                 .ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase)

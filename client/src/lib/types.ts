@@ -34,6 +34,7 @@ export interface MixerSnapshot {
   master: MasterState
   micMuted: boolean | null
   micName: string | null
+  micUsers: string[] // apps recording from the mic right now, e.g. a call
   devices: AudioDevice[]
   media: MediaInfo | null
   apps: AppChannel[]

@@ -37,6 +37,7 @@ export const state = reactive({
   master: { volume: 0, muted: false } as MasterState,
   micMuted: null as boolean | null,
   micName: null as string | null,
+  micUsers: [] as string[],
   devices: [] as AudioDevice[],
   media: null as MediaInfo | null,
   apps: [] as AppChannel[],
@@ -76,6 +77,25 @@ export function setHidden(key: string, hidden: boolean) {
   else next.delete(key)
   hiddenKeys.value = next
   localStorage.setItem(HIDDEN_KEY, JSON.stringify([...next]))
+}
+
+// the mic row: 'auto' (default) pops up only while an app records from the mic, i.e.
+// during calls, when its meter moves anyway. 'shown' pins it; for that the server holds its
+// own capture stream open so the meter moves outside calls too. 'hidden' keeps it away.
+export type MicMode = 'auto' | 'shown' | 'hidden'
+const MIC_KEY = 'vm.mic'
+const storedMicMode = localStorage.getItem(MIC_KEY)
+export const micMode = ref<MicMode>(storedMicMode === 'shown' || storedMicMode === 'hidden' ? storedMicMode : 'auto')
+
+export function setMicMode(mode: MicMode) {
+  micMode.value = mode
+  if (mode === 'auto') localStorage.removeItem(MIC_KEY)
+  else localStorage.setItem(MIC_KEY, mode)
+  syncMicMeter()
+}
+
+function syncMicMeter() {
+  invoke('SetMicMeter', micMode.value === 'shown' && !document.hidden)
 }
 
 // custom channel order: apps you've moved keep their place; the rest sort naturally.
@@ -139,6 +159,7 @@ connection.on('snapshot', (snapshot: MixerSnapshot) => {
   state.machineName = snapshot.machineName
   state.micMuted = snapshot.micMuted ?? null
   state.micName = snapshot.micName ?? null
+  state.micUsers = snapshot.micUsers ?? []
   state.devices = snapshot.devices ?? []
   applyMedia(snapshot.media ?? null)
   if (!isHeld('')) state.master = snapshot.master
@@ -173,6 +194,10 @@ connection.on('micChanged', (muted: boolean) => {
   state.micMuted = muted
 })
 
+connection.on('micUsers', (users: string[]) => {
+  state.micUsers = users
+})
+
 connection.on('devicesChanged', (devices: AudioDevice[]) => {
   state.devices = devices
 })
@@ -188,6 +213,7 @@ connection.on('peaks', (frame: PeakFrame) => {
 connection.onreconnecting(() => {
   status.value = 'reconnecting'
 })
+connection.onreconnected(syncMicMeter) // new connection id, the server forgot our mic meter wish
 // on successful reconnect the server pushes a fresh snapshot, which sets status back to 'live'
 connection.onclose(() => {
   if (status.value !== 'unpaired') status.value = 'offline'
@@ -198,6 +224,7 @@ async function ensureConnected() {
   if (status.value !== 'connecting') status.value = 'reconnecting'
   try {
     await connection.start()
+    syncMicMeter()
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error)
     if (message.includes('401')) {
@@ -217,6 +244,9 @@ for (const event of ['visibilitychange', 'pageshow', 'focus', 'online'] as const
     if (!document.hidden && status.value !== 'unpaired') void ensureConnected()
   })
 }
+
+// don't keep the PC's mic open for a phone sitting in a pocket or a background tab
+document.addEventListener('visibilitychange', syncMicMeter)
 
 export function start() {
   void ensureConnected()

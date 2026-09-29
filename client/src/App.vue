@@ -10,6 +10,7 @@ import {
   mediaPositionMs,
   mediaPrevious,
   mediaSeek,
+  micMode,
   moveUp,
   orderApps,
   peaks,
@@ -18,6 +19,7 @@ import {
   setAppVolume,
   setHidden,
   setMasterVolume,
+  setMicMode,
   start,
   state,
   status,
@@ -35,6 +37,13 @@ const confirmForget = ref(false)
 
 const visibleApps = computed(() => orderApps(state.apps.filter((a) => !hiddenKeys.value.has(a.key))))
 const hiddenApps = computed(() => state.apps.filter((a) => hiddenKeys.value.has(a.key)))
+const micAvailable = computed(() => state.micMuted !== null)
+const micInUse = computed(() => state.micUsers.length > 0)
+const micVisible = computed(
+  () => micAvailable.value && (micMode.value === 'shown' || (micMode.value === 'auto' && micInUse.value)),
+)
+const micHidden = computed(() => micAvailable.value && !micVisible.value)
+const hiddenCount = computed(() => hiddenApps.value.length + (micHidden.value ? 1 : 0))
 
 const micVars = computed(() => {
   const pct = state.micMuted ? 0 : Math.min(100, Math.round(peaks.mic * 100))
@@ -59,6 +68,11 @@ const machineLabel = computed(() => {
     case 'unpaired': return 'not paired'
   }
 })
+
+// × always clears the row right away; unpinning it keeps the pop-up during calls when that does
+function hideMic() {
+  setMicMode(micMode.value === 'shown' && !micInUse.value ? 'auto' : 'hidden')
+}
 
 function onMoveUp(key: string) {
   moveUp(key, visibleApps.value.map((a) => a.key))
@@ -101,7 +115,7 @@ function forgetPc() {
     window.setTimeout(() => (confirmForget.value = false), 3500)
     return
   }
-  for (const key of ['vm.token', 'vm.hidden', 'vm.order', 'vm.pins']) localStorage.removeItem(key)
+  for (const key of ['vm.token', 'vm.hidden', 'vm.order', 'vm.pins', 'vm.mic']) localStorage.removeItem(key)
   window.location.href = window.location.origin
 }
 
@@ -266,39 +280,52 @@ onMounted(start)
         Start some audio on {{ state.machineName || 'the PC' }} and it appears here by itself.
       </div>
 
-      <div v-if="state.micMuted !== null" class="channel microw" :class="{ 'is-muted': state.micMuted }">
-        <button
-          class="mute-btn sm"
-          :class="{ on: state.micMuted }"
-          :aria-label="state.micMuted ? 'Unmute microphone' : 'Mute microphone'"
-          :aria-pressed="state.micMuted"
-          @click="toggleMic"
-        >
-          <svg v-if="!state.micMuted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="3" width="6" height="11" rx="3" />
-            <path d="M6 11a6 6 0 0 0 12 0M12 17v3.5" />
-          </svg>
-          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="3" width="6" height="11" rx="3" />
-            <path d="M6 11a6 6 0 0 0 12 0M12 17v3.5M4 3l16 18" />
-          </svg>
-        </button>
-        <div class="mic-label">Mic</div>
-        <div v-if="micDisplayName" class="mic-name" :title="state.micName ?? ''">{{ micDisplayName }}</div>
-        <div class="fader-slot slim">
-          <div class="ledbar live" :style="micVars" aria-hidden="true"></div>
+      <section v-if="micVisible" class="channel microw" :class="{ 'is-muted': state.micMuted }">
+        <div class="ch-head">
+          <div class="mic-title">
+            <span class="mic-label">Mic</span>
+            <span v-if="micInUse" class="mic-users" :title="state.micName ?? ''">
+              <span class="onair" aria-hidden="true"></span>
+              <span class="mic-users-names">{{ state.micUsers.join(', ') }}</span>
+            </span>
+            <span v-else-if="micDisplayName" class="mic-name" :title="state.micName ?? ''">{{ micDisplayName }}</span>
+          </div>
+          <div v-if="state.micMuted" class="readout muted">MUTED</div>
+          <button class="hide-btn" aria-label="Hide microphone" @click="hideMic">×</button>
         </div>
-        <div class="readout" :class="{ muted: state.micMuted }">{{ state.micMuted ? 'MUTED' : '' }}</div>
-      </div>
+        <div class="ch-controls">
+          <button
+            class="mute-btn"
+            :class="{ on: state.micMuted }"
+            :aria-label="state.micMuted ? 'Unmute microphone' : 'Mute microphone'"
+            :aria-pressed="state.micMuted"
+            @click="toggleMic"
+          >
+            <svg v-if="!state.micMuted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M6 11a6 6 0 0 0 12 0M12 17v3.5" />
+            </svg>
+            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M6 11a6 6 0 0 0 12 0M12 17v3.5M4 3l16 18" />
+            </svg>
+          </button>
+          <!-- no mic volume to set: the dim ladder is just the unlit LEDs, the bright one is the level -->
+          <div class="fader-slot">
+            <div class="ledbar set" style="--fill: 100%; --frac: 1" aria-hidden="true"></div>
+            <div class="ledbar live" :style="micVars" aria-hidden="true"></div>
+          </div>
+        </div>
+      </section>
 
       <button
-        v-if="hiddenApps.length"
+        v-if="hiddenCount"
         class="channel hidden-head"
         :aria-expanded="showHidden"
         @click="showHidden = !showHidden"
       >
         <span class="hh-label">Hidden</span>
-        <span class="hh-count">{{ hiddenApps.length }}</span>
+        <span class="hh-count">{{ hiddenCount }}</span>
         <svg class="hh-chev" :class="{ open: showHidden }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M6 10l6 6 6-6" />
         </svg>
@@ -316,6 +343,23 @@ onMounted(start)
             <span v-else class="letter">{{ (app.name.trim()[0] ?? '?').toUpperCase() }}</span>
           </span>
           <span class="hidden-name">{{ app.name }}</span>
+          <span class="hidden-restore" aria-hidden="true">＋</span>
+        </button>
+        <button
+          v-if="micHidden"
+          class="channel hidden-row"
+          aria-label="Always show the microphone"
+          @click="setMicMode('shown')"
+        >
+          <span class="chip">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M6 11a6 6 0 0 0 12 0M12 17v3.5" />
+            </svg>
+          </span>
+          <span class="hidden-name">
+            Mic <span class="hidden-note">{{ micMode === 'auto' ? 'shows up during calls' : 'hidden, even during calls' }}</span>
+          </span>
           <span class="hidden-restore" aria-hidden="true">＋</span>
         </button>
       </template>

@@ -17,7 +17,7 @@ internal sealed class DeviceNotificationClient(AudioWorker worker) : IMMNotifica
 
     public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
     {
-        if ((flow == DataFlow.Render && role == Role.Multimedia) ||
+        if ((flow == DataFlow.Render && role is Role.Multimedia or Role.Communications) ||
             (flow == DataFlow.Capture && role == Role.Communications))
         {
             worker.ScheduleReinit();
