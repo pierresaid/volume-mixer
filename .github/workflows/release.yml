@@ -1,17 +1,35 @@
 name: release
 
+# Push a tag like v1.2.0 and this builds, stamps and publishes that version.
+# The tag is the only place a release version lives; the repo stays at 0.0.0-dev.
+
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: write     # create the GitHub release
+  id-token: write     # sign the build provenance attestation
+  attestations: write # store it
+
+defaults:
+  run:
+    shell: bash # fail fast on any failing command, Windows runner included
 
 jobs:
   release:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+
+      - name: Version from tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' is not v<major>.<minor>.<patch>[-prerelease]"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v5
         with:
@@ -23,6 +41,7 @@ jobs:
         working-directory: client
         run: |
           npm ci
+          npm version "$VERSION" --no-git-tag-version --allow-same-version # the About box shows it
           npm run build
 
       - uses: actions/setup-dotnet@v4
@@ -33,10 +52,38 @@ jobs:
         run: >
           dotnet publish server/VolumeMixer -c Release -r win-x64 --self-contained
           -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=embedded
+          -p:Version="$VERSION"
           -o publish
+
+      # the release notes start with how to check the download
+      - name: Checksum
+        working-directory: publish
+        env:
+          PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          hash=$(sha256sum VolumeMixer.exe | cut -c1-64)
+          printf '%s  VolumeMixer.exe\n' "$hash" > VolumeMixer.exe.sha256
+          {
+            printf '**SHA-256** of `VolumeMixer.exe`: `%s` (check it with `Get-FileHash .\\VolumeMixer.exe` in PowerShell)\n' "$hash"
+            if [[ "$PRIVATE" != true ]]; then
+              printf '\n**Build provenance:** `gh attestation verify VolumeMixer.exe --repo %s`\n' "$GITHUB_REPOSITORY"
+            fi
+          } > "$RUNNER_TEMP/notes.md"
+
+      # Signed SLSA provenance: lets anyone check the exe was built by this workflow from
+      # this tag. GitHub only offers attestations on public repos, so it's skipped while private.
+      - name: Attest build provenance
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest@v4
+        with:
+          subject-path: publish/VolumeMixer.exe
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: publish/VolumeMixer.exe
+          files: |
+            publish/VolumeMixer.exe
+            publish/VolumeMixer.exe.sha256
+          body_path: ${{ runner.temp }}/notes.md
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }} # v1.2.0-beta.1 never becomes "Latest"

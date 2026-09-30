@@ -50,4 +50,6 @@ cd ../server/VolumeMixer && dotnet run      # tray icon + QR window appear
 
 For UI work, keep `dotnet run` running and use `npm run dev`. Vite proxies to `localhost:6002` with hot reload.
 
+To release, push a version tag (`git tag v1.2.0 && git push origin v1.2.0`). CI builds the exe with that version and publishes it with its SHA-256 and a signed build-provenance attestation. The version in the repo stays `0.0.0-dev`, and a tag like `v1.2.0-beta.1` becomes a prerelease.
+
 [MIT](LICENSE)

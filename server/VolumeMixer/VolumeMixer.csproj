@@ -12,7 +12,7 @@
     <AssemblyName>VolumeMixer</AssemblyName>
     <ApplicationTitle>Volume Mixer</ApplicationTitle>
     <ApplicationIcon>Resources\app.ico</ApplicationIcon>
-    <Version>1.1.0</Version>
+    <Version>0.0.0-dev</Version> <!-- release builds get it from the git tag -->
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
