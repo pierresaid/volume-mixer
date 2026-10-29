@@ -112,9 +112,9 @@ public sealed class ServerHost
         worker.MicUsersChanged += users => _ = hub.Clients.All.SendAsync("micUsers", users);
         worker.DevicesChanged += devices => _ = hub.Clients.All.SendAsync("devicesChanged", devices);
         worker.PeaksReady += frame => _ = hub.Clients.All.SendAsync("peaks", frame);
-        worker.SnapshotRefreshed += s => _ = hub.Clients.All.SendAsync("snapshot",
-            new { s.MachineName, s.Master, s.MicMuted, s.MicName, s.MicUsers, s.Devices, s.Apps, Media = Media.CurrentWithFreshPosition });
+        worker.SnapshotRefreshed += s => _ = hub.Clients.All.SendAsync("snapshot", ControlHub.Payload(s, Media));
         Media.Changed += info => _ = hub.Clients.All.SendAsync("mediaChanged", info);
+        Media.SessionsChanged += sessions => _ = hub.Clients.All.SendAsync("mediaSessions", sessions);
         Connections.CountChanged += count => worker.SetClientCount(count);
 
         _ = Media.StartAsync();

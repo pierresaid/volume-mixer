@@ -42,18 +42,27 @@ public sealed class TrayContext : ApplicationContext
             ContextMenuStrip = menu,
             Visible = true,
         };
-        _icon.DoubleClick += (_, _) => ShowQr();
+        _icon.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left) ShowQr();
+        };
         UpdateTooltip();
 
         // a second launched instance signals us to pop the QR window
         ThreadPool.RegisterWaitForSingleObject(showSignal,
             (_, _) => _uiMarshal.BeginInvoke(ShowQr), null, -1, executeOnlyOnce: false);
 
-        // phones joining/leaving update the tooltip count quietly; no balloons
+        // phones joining/leaving update the tooltip count quietly; no balloons. An open QR window
+        // confirms the connection, which is the "it worked" moment of pairing.
         _host.Connections.CountChanged += count => _uiMarshal.BeginInvoke(() =>
         {
             _connectedCount = count;
             UpdateTooltip();
+        });
+        _host.Connections.Joined += (who, _) => _uiMarshal.BeginInvoke(() =>
+        {
+            if (_qrForm is { IsDisposed: false, Visible: true })
+                _qrForm.ShowConnected(who);
         });
 
         // the PC changed networks / got a new address -> new QR + tell the user
@@ -104,7 +113,7 @@ public sealed class TrayContext : ApplicationContext
     private void ShowQr()
     {
         if (_qrForm is null || _qrForm.IsDisposed)
-            _qrForm = new QrForm();
+            _qrForm = new QrForm(_host.Port);
         _qrForm.SetLink(_host.PhoneUrl);
         _qrForm.Show();
         _qrForm.WindowState = FormWindowState.Normal;

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using Windows.Networking.Connectivity;
 
 namespace VolumeMixer;
 
@@ -34,6 +35,26 @@ public static class Net
                 .SelectMany(nic => nic.GetIPProperties().UnicastAddresses)
                 .Select(addr => addr.Address)
                 .FirstOrDefault(addr => addr.AddressFamily == AddressFamily.InterNetwork);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The network phones must join, as the user knows it: "Wi-Fi “MyBox”", or "a wired network"
+    /// (then any Wi-Fi of the same router works). Null when offline.
+    /// </summary>
+    public static string? DescribeNetwork()
+    {
+        try
+        {
+            var profile = NetworkInformation.GetInternetConnectionProfile();
+            if (profile is null) return null;
+            return profile.IsWlanConnectionProfile && !string.IsNullOrWhiteSpace(profile.ProfileName)
+                ? $"Wi-Fi “{profile.ProfileName}”"
+                : "a wired network";
         }
         catch
         {

@@ -18,7 +18,9 @@ Windows 10/11 · any phone browser · same Wi-Fi.
 
 ## Good to know
 
-- Everything syncs both ways, live. Change something on the PC and the phone follows, and apps appear and disappear as they start and stop playing.
+- Everything syncs both ways, live. Change something on the PC and the phone follows. Apps appear when they start playing, and fold into *Idle* after two quiet minutes.
+- Long-press an app's name and drag to reorder. The mic shows up by itself during calls.
+- Add it to your phone's home screen for an app icon.
 - It reconnects by itself. Lock your phone for an hour, come back: live again in a second.
 - Pairing is a secret token inside the QR, so nobody on your Wi-Fi can control your audio without scanning it. Reset it anytime from the tray.
 - It lives in the tray, can start with Windows, and is one self-contained exe.
@@ -32,7 +34,7 @@ Windows 10/11 · any phone browser · same Wi-Fi.
 | Symptom | Fix |
 |---|---|
 | The page won't load on the phone | Same Wi-Fi? Guest networks and router “AP/client isolation” block phone↔PC traffic. |
-| It worked before, now it doesn't | The PC probably got a new IP (the tray warns you). Re-scan the QR, or give the PC a DHCP reservation and it never happens again. |
+| It worked before, now it doesn't | The PC probably got a new IP (the tray warns you). Re-scan the QR, or give the PC a DHCP reservation and it never happens again. On a network Windows treats as *Private*, phones that can reach the PC by name switch to it by themselves and survive IP changes. |
 | You clicked *Cancel* on the firewall prompt | That silently blocks the app forever. Tray → **Fix firewall (admin)** repairs it in one click. |
 | “This phone isn't paired” | Pairing was reset on the PC. Re-scan the QR code. |
 | Tray says it's using a different port | Port 6002 was taken, so the next free one was used. Re-scan the QR and the phone learns it. |

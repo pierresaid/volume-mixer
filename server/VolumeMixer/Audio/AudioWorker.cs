@@ -663,7 +663,7 @@ public sealed class AudioWorker : IDisposable
         PublishGroup(groupKey);
     }
 
-    private static string ResolveName(Process process, string? exePath)
+    internal static string ResolveName(Process process, string? exePath)
     {
         if (exePath is not null)
         {
@@ -696,6 +696,7 @@ public sealed class AudioWorker : IDisposable
         var dead = new List<string>();
         var volume = 0;
         var allMuted = true;
+        var active = false;
         SessionEntry? first = null;
 
         foreach (var (id, entry) in members)
@@ -705,6 +706,7 @@ public sealed class AudioWorker : IDisposable
                 var sessionVolume = entry.Control.SimpleAudioVolume;
                 volume = Math.Max(volume, (int)Math.Round(sessionVolume.Volume * 100));
                 allMuted &= sessionVolume.Mute;
+                active |= SafeState(entry.Control) == AudioSessionState.AudioSessionStateActive;
                 first ??= entry;
             }
             catch
@@ -728,7 +730,7 @@ public sealed class AudioWorker : IDisposable
             return;
         }
 
-        var app = new AppState(groupKey, first.Name, first.IconKey, volume, allMuted, first.IsSystem);
+        var app = new AppState(groupKey, first.Name, first.IconKey, volume, allMuted, first.IsSystem, active);
         if (!_apps.TryGetValue(groupKey, out var previous) || previous != app)
         {
             _apps[groupKey] = app;

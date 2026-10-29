@@ -9,14 +9,12 @@ const props = defineProps<{
   iconKey?: string | null
   master?: boolean
   hideable?: boolean
-  canMoveUp?: boolean
 }>()
 
 const emit = defineEmits<{
   volume: [value: number]
   mute: []
   hide: []
-  moveup: []
 }>()
 
 const letter = computed(() => (props.name.trim()[0] ?? '?').toUpperCase())
@@ -75,11 +73,6 @@ function onMuteClick() {
   emit('mute')
 }
 
-function onMoveUp() {
-  navigator.vibrate?.(8)
-  emit('moveup')
-}
-
 onBeforeUnmount(stopRepeat)
 </script>
 
@@ -87,23 +80,12 @@ onBeforeUnmount(stopRepeat)
   <section class="channel" :class="{ main: master, 'is-muted': muted }">
     <div class="ch-head">
       <div v-if="!master" class="chip">
-        <img v-if="iconKey" :src="`/icons/${iconKey}`" alt="" loading="lazy" />
+        <img v-if="iconKey" :src="`/icons/${iconKey}`" alt="" loading="lazy" draggable="false" />
         <span v-else class="letter">{{ letter }}</span>
       </div>
       <div class="ch-name">{{ name }}</div>
       <button class="readout" :class="{ muted }" :aria-label="`Fine-adjust ${name} volume`" @click="stepperOpen = !stepperOpen">
         {{ muted ? 'MUTE' : volume }}
-      </button>
-      <button
-        v-if="hideable"
-        class="up-btn"
-        :disabled="!canMoveUp"
-        :aria-label="`Move ${name} up`"
-        @click="onMoveUp"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M6 14.5l6-6 6 6" />
-        </svg>
       </button>
       <button
         v-if="hideable"

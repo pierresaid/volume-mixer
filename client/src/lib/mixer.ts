@@ -4,30 +4,17 @@ import {
   type HubConnection,
 } from '@microsoft/signalr'
 import { reactive, ref } from 'vue'
+import { handoffUrl, token } from './handoff'
 import type {
   AppChannel,
   AudioDevice,
   ConnectionStatus,
   MasterState,
   MediaInfo,
+  MediaSessionInfo,
   MixerSnapshot,
   PeakFrame,
 } from './types'
-
-// ---- pairing token: arrives once via the QR URL fragment, then lives in localStorage ----
-
-const TOKEN_KEY = 'vm.token'
-
-function resolveToken(): string {
-  const match = window.location.hash.match(/[#&]t=([^&]+)/)
-  if (match) {
-    localStorage.setItem(TOKEN_KEY, match[1])
-    return match[1]
-  }
-  return localStorage.getItem(TOKEN_KEY) ?? ''
-}
-
-const token = resolveToken()
 
 // ---- reactive state ----
 
@@ -40,8 +27,29 @@ export const state = reactive({
   micUsers: [] as string[],
   devices: [] as AudioDevice[],
   media: null as MediaInfo | null,
+  mediaSessions: [] as MediaSessionInfo[],
   apps: [] as AppChannel[],
 })
+
+// ---- idle apps: an app whose audio stream has been closed for a while (Steam, System sounds,
+// a paused browser...) folds away. The grace period keeps a browser between two videos put. ----
+
+const IDLE_AFTER_MS = 2 * 60_000
+const inactiveSince = reactive<Record<string, number>>({}) // 0 = already quiet when this page opened
+export const clock = ref(Date.now())
+window.setInterval(() => (clock.value = Date.now()), 5000)
+let firstSnapshot = true
+
+function trackActivity(app: AppChannel) {
+  if (app.active) delete inactiveSince[app.key]
+  else if (!(app.key in inactiveSince)) inactiveSince[app.key] = firstSnapshot ? 0 : Date.now()
+}
+
+export function isIdle(app: AppChannel): boolean {
+  if (app.active) return false
+  const since = inactiveSince[app.key] ?? 0
+  return since === 0 || clock.value - since >= IDLE_AFTER_MS
+}
 
 // ---- live meters: server sends raw peaks at 10 Hz; a local ticker eases them
 // down so the LEDs fall naturally even after the stream goes quiet ----
@@ -115,14 +123,9 @@ export function orderApps(apps: AppChannel[]): AppChannel[] {
   })
 }
 
-/** Swap the channel with the one above it (within the currently visible list). */
-export function moveUp(key: string, visibleKeys: string[]) {
-  const i = visibleKeys.indexOf(key)
-  if (i <= 0) return
-  const next = [...visibleKeys]
-  ;[next[i - 1], next[i]] = [next[i], next[i - 1]]
-  // snapshot the whole visible sequence, keep positions of currently-closed apps after it
-  order.value = [...next, ...order.value.filter((k) => !next.includes(k))]
+/** Save a new visible sequence; currently-closed apps keep their places after it. */
+export function setOrder(visibleKeys: string[]) {
+  order.value = [...visibleKeys, ...order.value.filter((k) => !visibleKeys.includes(k))]
   localStorage.setItem(ORDER_KEY, JSON.stringify(order.value))
 }
 
@@ -161,6 +164,7 @@ connection.on('snapshot', (snapshot: MixerSnapshot) => {
   state.micName = snapshot.micName ?? null
   state.micUsers = snapshot.micUsers ?? []
   state.devices = snapshot.devices ?? []
+  state.mediaSessions = snapshot.mediaSessions ?? []
   applyMedia(snapshot.media ?? null)
   if (!isHeld('')) state.master = snapshot.master
   const localByKey = new Map(state.apps.map((a) => [a.key, a]))
@@ -168,10 +172,14 @@ connection.on('snapshot', (snapshot: MixerSnapshot) => {
     const local = localByKey.get(app.key)
     return local && isHeld(app.key) ? { ...app, volume: local.volume } : app
   })
+  state.apps.forEach(trackActivity)
+  firstSnapshot = false
   status.value = 'live'
+  void moveToLocalName(snapshot.hostName)
 })
 
 connection.on('appUpserted', (app: AppChannel) => {
+  trackActivity(app)
   const index = state.apps.findIndex((a) => a.key === app.key)
   if (isHeld(app.key) && index >= 0) {
     // keep the locally-dragged volume, accept everything else
@@ -184,6 +192,7 @@ connection.on('appUpserted', (app: AppChannel) => {
 
 connection.on('appRemoved', (key: string) => {
   state.apps = state.apps.filter((a) => a.key !== key)
+  delete inactiveSince[key]
 })
 
 connection.on('masterChanged', (master: MasterState) => {
@@ -200,6 +209,10 @@ connection.on('micUsers', (users: string[]) => {
 
 connection.on('devicesChanged', (devices: AudioDevice[]) => {
   state.devices = devices
+})
+
+connection.on('mediaSessions', (sessions: MediaSessionInfo[]) => {
+  state.mediaSessions = sessions
 })
 
 connection.on('mediaChanged', (media: MediaInfo | null) => {
@@ -375,6 +388,43 @@ window.setInterval(() => {
     : mediaAnchorMs
   mediaPositionMs.value = Math.min(Math.max(position, 0), media.durationMs)
 }, 250)
+
+/** Make "now playing" follow another media player (when several are open). */
+export function mediaSelect(id: string) {
+  state.mediaSessions = state.mediaSessions.map((s) => ({ ...s, current: s.id === id })) // optimistic
+  invoke('MediaSelect', id)
+}
+
+// ---- a stable address: the QR holds the PC's IP, which can change (new router lease, other
+// network). The PC's mDNS name, <host>.local, survives that, but not every phone or network
+// resolves it (Windows only answers on networks marked Private), so the page only moves
+// there once the name answers from this phone. ----
+
+let triedLocalName = false
+
+async function moveToLocalName(hostName: string | undefined) {
+  if (triedLocalName) return
+  triedLocalName = true
+  const here = window.location.hostname
+  const onLanIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(here) && !here.startsWith('127.')
+  // a home-screen web app can't change address without dropping out to the browser
+  const standalone = window.matchMedia('(display-mode: standalone)').matches
+    || (navigator as Navigator & { standalone?: boolean }).standalone === true
+  if (!hostName || !/^[a-z0-9-]+$/i.test(hostName) || !onLanIp || standalone) return
+
+  const port = window.location.port ? `:${window.location.port}` : ''
+  const origin = `${window.location.protocol}//${hostName.toLowerCase()}.local${port}`
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 2500)
+  try {
+    await fetch(`${origin}/?probe`, { mode: 'no-cors', cache: 'no-store', signal: controller.signal })
+  } catch {
+    return // not resolvable or reachable from this phone: stay on the IP
+  } finally {
+    window.clearTimeout(timer)
+  }
+  window.location.replace(handoffUrl(origin))
+}
 
 export function mediaSeek(positionMs: number) {
   seekHoldUntil = Date.now() + 2500

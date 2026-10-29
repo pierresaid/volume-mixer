@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using VolumeMixer.Audio;
 using Windows.Media.Control;
 
 namespace VolumeMixer.Media;
@@ -15,6 +16,9 @@ public record MediaInfo(
     long DurationMs,
     double Rate);
 
+/// <summary>One media player Windows knows about; the phone can pick which one "now playing" follows.</summary>
+public record MediaSessionInfo(string Id, string Name, bool Current);
+
 /// <summary>
 /// Now-playing info and transport controls via the Windows media-session API (SMTC).
 /// Positions are sent as ANCHORS (position at send time + playback rate): clients
@@ -25,6 +29,9 @@ public sealed class MediaService
 {
     private GlobalSystemMediaTransportControlsSessionManager? _manager;
     private GlobalSystemMediaTransportControlsSession? _session;
+    private string? _sessionId;
+    private string? _pinnedId; // picked on a phone: followed instead of Windows' choice until that player goes away
+    private readonly ConcurrentDictionary<string, string?> _appNames = new(); // app model id -> display name
     private readonly ConcurrentDictionary<string, byte[]> _art = new();
     private readonly SemaphoreSlim _bindGate = new(1, 1);
     private DateTimeOffset _currentAt = DateTimeOffset.UtcNow;
@@ -45,12 +52,17 @@ public sealed class MediaService
 
     public event Action<MediaInfo?>? Changed;
 
+    public IReadOnlyList<MediaSessionInfo> Sessions { get; private set; } = [];
+
+    public event Action<IReadOnlyList<MediaSessionInfo>>? SessionsChanged;
+
     public async Task StartAsync()
     {
         try
         {
             _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
             _manager.CurrentSessionChanged += (_, _) => _ = RebindAsync();
+            _manager.SessionsChanged += (_, _) => _ = RebindAsync();
             await RebindAsync();
         }
         catch (Exception ex)
@@ -59,13 +71,25 @@ public sealed class MediaService
         }
     }
 
+    public async Task SelectAsync(string id)
+    {
+        _pinnedId = id;
+        await RebindAsync();
+    }
+
     private async Task RebindAsync()
     {
         await _bindGate.WaitAsync();
         try
         {
-            var session = _manager?.GetCurrentSession();
-            if (!ReferenceEquals(session, _session))
+            var all = _manager?.GetSessions() ?? [];
+            var ids = SessionIds(all);
+            var pinned = _pinnedId is null ? -1 : ids.IndexOf(_pinnedId);
+            if (_pinnedId is not null && pinned < 0) _pinnedId = null; // the picked player went away
+            var session = pinned >= 0 ? all[pinned] : _manager?.GetCurrentSession();
+            var sessionId = session is null ? null : ids.ElementAtOrDefault(IndexOf(all, session)) ?? session.SourceAppUserModelId;
+
+            if (sessionId != _sessionId || (session is null) != (_session is null))
             {
                 if (_session is not null)
                 {
@@ -74,6 +98,7 @@ public sealed class MediaService
                     _session.TimelinePropertiesChanged -= OnTimelineChanged;
                 }
                 _session = session;
+                _sessionId = sessionId;
                 if (_session is not null)
                 {
                     _session.MediaPropertiesChanged += OnPropertiesChanged;
@@ -81,12 +106,104 @@ public sealed class MediaService
                     _session.TimelinePropertiesChanged += OnTimelineChanged;
                 }
             }
+
+            var list = new List<MediaSessionInfo>();
+            for (var i = 0; i < all.Count; i++)
+            {
+                var name = AppName(all[i].SourceAppUserModelId);
+                if (name is null)
+                {
+                    try { name = (await all[i].TryGetMediaPropertiesAsync()).Title; } catch { }
+                }
+                list.Add(new MediaSessionInfo(ids[i], string.IsNullOrWhiteSpace(name) ? "Media" : name, ids[i] == _sessionId));
+            }
+            if (!list.SequenceEqual(Sessions))
+            {
+                Sessions = list;
+                SessionsChanged?.Invoke(list);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Media] rebind failed: {ex.Message}");
         }
         finally
         {
             _bindGate.Release();
         }
         await RefreshAsync();
+    }
+
+    /// <summary>Stable ids: the app model id, numbered when one app has several sessions.</summary>
+    private static List<string> SessionIds(IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions)
+    {
+        var ids = new List<string>();
+        var counts = new Dictionary<string, int>();
+        foreach (var session in sessions)
+        {
+            var app = session.SourceAppUserModelId ?? "";
+            counts[app] = counts.GetValueOrDefault(app) + 1;
+            ids.Add(counts[app] == 1 ? app : $"{app}#{counts[app]}");
+        }
+        return ids;
+    }
+
+    private static int IndexOf(IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions, GlobalSystemMediaTransportControlsSession session)
+    {
+        // WinRT hands back the same wrapper for the same session; the app id is the fallback
+        for (var i = 0; i < sessions.Count; i++)
+        {
+            if (ReferenceEquals(sessions[i], session)) return i;
+        }
+        for (var i = 0; i < sessions.Count; i++)
+        {
+            if (sessions[i].SourceAppUserModelId == session.SourceAppUserModelId) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// A readable name for a media app, from its app model id: "Spotify.exe" or "Chrome" match a
+    /// running process (named like its mixer channel); packaged apps ("Vendor.App_hash!App") use
+    /// their app id. Null when nothing fits, e.g. Firefox's hashed id.
+    /// </summary>
+    private string? AppName(string? appModelId)
+    {
+        if (string.IsNullOrEmpty(appModelId)) return null;
+        return _appNames.GetOrAdd(appModelId, id =>
+        {
+            var bang = id.IndexOf('!');
+            if (bang >= 0)
+            {
+                var app = id[(bang + 1)..];
+                var dot = app.LastIndexOf('.');
+                return dot >= 0 && dot < app.Length - 1 ? app[(dot + 1)..] : app;
+            }
+
+            var exe = id.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? id[..^4] : id;
+            try
+            {
+                var processes = Process.GetProcessesByName(exe);
+                try
+                {
+                    foreach (var process in processes)
+                    {
+                        try
+                        {
+                            var path = process.MainModule?.FileName;
+                            if (path is not null) return AudioWorker.ResolveName(process, path);
+                        }
+                        catch { /* elevated/protected: try the next one */ }
+                    }
+                }
+                finally
+                {
+                    foreach (var process in processes) process.Dispose();
+                }
+            }
+            catch { }
+            return null;
+        });
     }
 
     private void OnPropertiesChanged(GlobalSystemMediaTransportControlsSession sender, MediaPropertiesChangedEventArgs args) =>

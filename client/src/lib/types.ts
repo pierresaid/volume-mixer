@@ -10,6 +10,7 @@ export interface AppChannel {
   volume: number
   muted: boolean
   isSystem: boolean
+  active: boolean // an audio stream is running right now
 }
 
 export interface AudioDevice {
@@ -29,14 +30,23 @@ export interface MediaInfo {
   rate: number
 }
 
+/** A media player Windows knows about; "now playing" follows the current one. */
+export interface MediaSessionInfo {
+  id: string
+  name: string
+  current: boolean
+}
+
 export interface MixerSnapshot {
   machineName: string
+  hostName: string // the PC's network name; phones try <hostName>.local
   master: MasterState
   micMuted: boolean | null
   micName: string | null
   micUsers: string[] // apps recording from the mic right now, e.g. a call
   devices: AudioDevice[]
   media: MediaInfo | null
+  mediaSessions: MediaSessionInfo[]
   apps: AppChannel[]
 }
 

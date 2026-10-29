@@ -3,15 +3,17 @@ import { computed, onMounted, ref } from 'vue'
 import pkg from '../package.json'
 import ChannelStrip from './components/ChannelStrip.vue'
 import { keepAwake, toggleAwake } from './lib/awake'
+import { shortDeviceName, shortDeviceNames } from './lib/devices'
 import {
   hiddenKeys,
+  isIdle,
   mediaNext,
   mediaPlayPause,
   mediaPositionMs,
   mediaPrevious,
   mediaSeek,
+  mediaSelect,
   micMode,
-  moveUp,
   orderApps,
   peaks,
   retryPairing,
@@ -20,6 +22,7 @@ import {
   setHidden,
   setMasterVolume,
   setMicMode,
+  setOrder,
   start,
   state,
   status,
@@ -27,16 +30,22 @@ import {
   toggleMasterMute,
   toggleMic,
 } from './lib/mixer'
+import { useLongPressReorder } from './lib/reorder'
 
 const REPO_URL = 'https://github.com/pierresaid/volume-mixer'
 const host = window.location.host
 
 const showHidden = ref(false)
+const showIdle = ref(false)
 const showAbout = ref(false)
 const confirmForget = ref(false)
 
 const visibleApps = computed(() => orderApps(state.apps.filter((a) => !hiddenKeys.value.has(a.key))))
+// apps whose audio has been off for a while fold into "Idle", still one tap away
+const activeApps = computed(() => visibleApps.value.filter((a) => !isIdle(a)))
+const idleApps = computed(() => visibleApps.value.filter((a) => isIdle(a)))
 const hiddenApps = computed(() => state.apps.filter((a) => hiddenKeys.value.has(a.key)))
+const deviceLabels = computed(() => shortDeviceNames(state.devices.map((d) => d.name)))
 const micAvailable = computed(() => state.micMuted !== null)
 const micInUse = computed(() => state.micUsers.length > 0)
 const micVisible = computed(
@@ -50,10 +59,8 @@ const micVars = computed(() => {
   return { '--fill': `${pct}%`, '--frac': String(Math.max(pct, 1) / 100) }
 })
 
-// "Microphone (WH-1000XM6...)" / "Headset (WH-1000XM6...)" -> the product name inside
-const micDisplayName = computed(() =>
-  state.micName?.replace(/^[^(]*\((.+)\)\s*$/, '$1') ?? '',
-)
+// "Headset (WH-1000XM6)" -> "WH-1000XM6"
+const micDisplayName = computed(() => (state.micName ? shortDeviceName(state.micName) : ''))
 
 const ledClass = computed(() =>
   status.value === 'live' ? '' : status.value === 'reconnecting' || status.value === 'connecting' ? 'warn' : 'off',
@@ -74,9 +81,29 @@ function hideMic() {
   setMicMode(micMode.value === 'shown' && !micInUse.value ? 'auto' : 'hidden')
 }
 
-function onMoveUp(key: string) {
-  moveUp(key, visibleApps.value.map((a) => a.key))
+// ---- reorder: long-press an app's name and drag it (within its list). The order is per phone. ----
+
+const TIP_KEY = 'vm.tip.reorder'
+const reorderTipDone = ref(localStorage.getItem(TIP_KEY) === 'done')
+
+function dismissReorderTip() {
+  reorderTipDone.value = true
+  localStorage.setItem(TIP_KEY, 'done')
 }
+
+const reorder = useLongPressReorder((from, to) => {
+  const list = [activeApps.value, idleApps.value].find(
+    (apps) => apps.some((a) => a.key === from) && apps.some((a) => a.key === to),
+  )
+  if (!list) return
+  const keys = list.map((a) => a.key)
+  keys.splice(keys.indexOf(from), 1)
+  keys.splice(list.findIndex((a) => a.key === to), 0, from) // lands after the target moving down, before it moving up
+  const active = list === activeApps.value ? keys : activeApps.value.map((a) => a.key)
+  const idle = list === idleApps.value ? keys : idleApps.value.map((a) => a.key)
+  setOrder([...active, ...idle])
+  dismissReorderTip()
+})
 
 // ---- seek bar: always scrubbable, with a smaller cap than the volume faders.
 // Dragging previews the target time; the seek is sent only on release. ----
@@ -115,7 +142,9 @@ function forgetPc() {
     window.setTimeout(() => (confirmForget.value = false), 3500)
     return
   }
-  for (const key of ['vm.token', 'vm.hidden', 'vm.order', 'vm.pins', 'vm.mic']) localStorage.removeItem(key)
+  for (const key of Object.keys(localStorage)) {
+    if (key.startsWith('vm.')) localStorage.removeItem(key)
+  }
   window.location.href = window.location.origin
 }
 
@@ -229,6 +258,19 @@ onMounted(start)
             <span class="time total">{{ fmt(state.media.durationMs) }}</span>
           </div>
         </div>
+
+        <div v-if="state.mediaSessions.length > 1" class="media-chips" role="group" aria-label="Media player">
+          <button
+            v-for="session in state.mediaSessions"
+            :key="session.id"
+            class="out-chip"
+            :class="{ active: session.current }"
+            :aria-pressed="session.current"
+            @click="mediaSelect(session.id)"
+          >
+            {{ session.name }}
+          </button>
+        </div>
       </div>
 
       <ChannelStrip
@@ -245,39 +287,73 @@ onMounted(start)
         <div class="out-label">Output</div>
         <div class="out-chips">
           <button
-            v-for="device in state.devices"
+            v-for="(device, i) in state.devices"
             :key="device.id"
             class="out-chip"
             :class="{ active: device.isDefault }"
             :title="device.name"
             @click="selectDevice(device.id)"
           >
-            {{ device.name }}
+            {{ deviceLabels[i] }}
           </button>
         </div>
       </div>
 
-      <div class="bank">
+      <div class="bank" @pointerdown="reorder.onPointerDown" @contextmenu="reorder.onContextMenu">
         <ChannelStrip
-          v-for="(app, index) in visibleApps"
+          v-for="app in activeApps"
           :key="app.key"
+          :data-key="app.key"
           :name="app.name"
           :volume="app.volume"
           :muted="app.muted"
           :peak="peaks.apps[app.key] ?? 0"
           :icon-key="app.iconKey"
           hideable
-          :can-move-up="index > 0"
           @volume="(v) => setAppVolume(app.key, v)"
           @mute="toggleAppMute(app.key)"
           @hide="setHidden(app.key, true)"
-          @moveup="onMoveUp(app.key)"
         />
       </div>
 
-      <div v-if="visibleApps.length === 0" class="channel empty">
+      <div v-if="activeApps.length === 0" class="channel empty">
         Nothing is playing right now.<br />
         Start some audio on {{ state.machineName || 'the PC' }} and it appears here by itself.
+      </div>
+
+      <button
+        v-if="idleApps.length"
+        class="channel hidden-head"
+        :aria-expanded="showIdle"
+        @click="showIdle = !showIdle"
+      >
+        <span class="hh-label">Idle</span>
+        <span class="hh-count">{{ idleApps.length }}</span>
+        <span class="hh-note">no sound for a while</span>
+        <svg class="hh-chev" :class="{ open: showIdle }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 10l6 6 6-6" />
+        </svg>
+      </button>
+      <div
+        v-if="showIdle && idleApps.length"
+        class="bank idle-bank"
+        @pointerdown="reorder.onPointerDown"
+        @contextmenu="reorder.onContextMenu"
+      >
+        <ChannelStrip
+          v-for="app in idleApps"
+          :key="app.key"
+          :data-key="app.key"
+          :name="app.name"
+          :volume="app.volume"
+          :muted="app.muted"
+          :peak="peaks.apps[app.key] ?? 0"
+          :icon-key="app.iconKey"
+          hideable
+          @volume="(v) => setAppVolume(app.key, v)"
+          @mute="toggleAppMute(app.key)"
+          @hide="setHidden(app.key, true)"
+        />
       </div>
 
       <section v-if="micVisible" class="channel microw" :class="{ 'is-muted': state.micMuted }">
@@ -366,6 +442,10 @@ onMounted(start)
     </main>
 
     <footer class="deck-foot">
+      <p v-if="!reorderTipDone && visibleApps.length > 1" class="foot-tip">
+        Tip: long-press an app's name, then drag it to reorder.
+        <button class="tip-close" aria-label="Dismiss tip" @click="dismissReorderTip">×</button>
+      </p>
       <button class="foot-btn" :aria-pressed="keepAwake" @click="toggleAwake">
         <span class="dot" :class="{ on: keepAwake }"></span>
         keep screen on

@@ -49,9 +49,22 @@ public class ControlHub(AudioWorker worker, MediaService media, ConnectionTracke
 
     public Task MediaSeek(long positionMs) => media.SeekAsync(positionMs);
 
-    private async Task<object> ComposeSnapshotAsync()
+    public Task MediaSelect(string id) => media.SelectAsync(id);
+
+    private async Task<object> ComposeSnapshotAsync() => Payload(await worker.GetSnapshotAsync(), media);
+
+    /// <summary>The "snapshot" message: everything a phone shows, sent on every (re)connect.</summary>
+    public static object Payload(MixerSnapshot s, MediaService media) => new
     {
-        var s = await worker.GetSnapshotAsync();
-        return new { s.MachineName, s.Master, s.MicMuted, s.MicName, s.MicUsers, s.Devices, s.Apps, Media = media.CurrentWithFreshPosition };
-    }
+        s.MachineName,
+        HostName = Dns.GetHostName(), // phones try <HostName>.local, which survives IP changes
+        s.Master,
+        s.MicMuted,
+        s.MicName,
+        s.MicUsers,
+        s.Devices,
+        s.Apps,
+        Media = media.CurrentWithFreshPosition,
+        MediaSessions = media.Sessions,
+    };
 }
