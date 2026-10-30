@@ -22,6 +22,7 @@ public sealed class AudioWorker : IDisposable
     private MMDevice? _device;
     private MMDevice? _commsDevice; // default communications output when it isn't _device: calls often play there
     private MMDevice? _mic;
+    private readonly HashSet<string> _boundIds = new(); // IDs of the devices above, read on the worker thread
     private bool _micIsBluetooth;
     private WasapiCapture? _micCapture;
     private readonly HashSet<string> _micMeterWanted = new(); // connection ids showing the mic row
@@ -154,6 +155,18 @@ public sealed class AudioWorker : IDisposable
     });
 
     internal void PostSessionExpired(string sessionId) => Post(() => RemoveSession(sessionId));
+
+    /// <summary>
+    /// An endpoint was plugged, unplugged or woke up. One we're bound to comes back as a
+    /// new device under the same ID, and the old binding no longer sees its sessions.
+    /// </summary>
+    internal void PostDeviceStateChanged(string deviceId) => Post(() =>
+    {
+        if (_boundIds.Contains(deviceId))
+            ScheduleReinit();
+        else
+            ScheduleDeviceListRefresh();
+    });
 
     internal void PostMasterChanged(float volume, bool muted) => Post(() =>
     {
@@ -295,6 +308,7 @@ public sealed class AudioWorker : IDisposable
                 _enumerator.RegisterEndpointNotificationCallback(_deviceNotifications);
             }
             _device = _enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            _boundIds.Add(_device.ID);
             _device.AudioEndpointVolume.OnVolumeNotification += OnEndpointVolumeNotification;
             _device.AudioSessionManager.OnSessionCreated += OnSessionCreated;
             InitializeCommsDevice();
@@ -334,6 +348,7 @@ public sealed class AudioWorker : IDisposable
             {
                 _mic = _enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Multimedia);
             }
+            _boundIds.Add(_mic.ID);
             _mic.AudioEndpointVolume.OnVolumeNotification += OnMicVolumeNotification;
             _micMuted = _mic.AudioEndpointVolume.Mute;
             try { _micName = _mic.FriendlyName; } catch { _micName = null; }
@@ -364,6 +379,7 @@ public sealed class AudioWorker : IDisposable
             }
             comms.AudioSessionManager.OnSessionCreated += OnSessionCreated;
             _commsDevice = comms;
+            _boundIds.Add(comms.ID);
         }
         catch
         {
@@ -485,6 +501,7 @@ public sealed class AudioWorker : IDisposable
             RemoveSession(id);
         _sessions.Clear();
         _apps.Clear();
+        _boundIds.Clear();
 
         if (_device is not null)
         {
@@ -564,6 +581,16 @@ public sealed class AudioWorker : IDisposable
         if (_device is null) return;
         try
         {
+            // a default-device change we didn't hear about: bind to the new one
+            using (var current = _enumerator!.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia))
+            {
+                if (current.ID != _device.ID)
+                {
+                    ScheduleReinit();
+                    return;
+                }
+            }
+
             var seen = new HashSet<string>();
             ScanSessions(_device, seen);
             if (_commsDevice is not null)

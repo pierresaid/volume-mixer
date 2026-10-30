@@ -27,6 +27,15 @@ internal sealed class SessionEvents(AudioWorker worker, string sessionId) : IAud
             worker.PostSessionChanged(sessionId);
     }
 
-    public void OnSessionDisconnected(AudioSessionDisconnectReason disconnectReason) =>
+    public void OnSessionDisconnected(AudioSessionDisconnectReason disconnectReason)
+    {
         worker.PostSessionExpired(sessionId);
+        // the device went away (Bluetooth asleep or out of range, unplugged, a new format)
+        // or the audio service restarted: what comes back is a new device, even under the
+        // same ID, and its sessions only show through a fresh binding
+        if (disconnectReason is AudioSessionDisconnectReason.DisconnectReasonDeviceRemoval
+            or AudioSessionDisconnectReason.DisconnectReasonServerShutdown
+            or AudioSessionDisconnectReason.DisconnectReasonFormatChanged)
+            worker.ScheduleReinit();
+    }
 }

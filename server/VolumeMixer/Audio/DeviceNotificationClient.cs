@@ -4,16 +4,17 @@ using NAudio.CoreAudioApi.Interfaces;
 namespace VolumeMixer.Audio;
 
 /// <summary>
-/// Reacts to endpoint topology changes: a default output/mic change triggers a full
-/// re-bind, plug/unplug refreshes the device list pushed to phones.
+/// Reacts to endpoint topology changes: a default output/mic change, or a bound device
+/// unplugged and back (Bluetooth waking up), triggers a full re-bind; other plug/unplug
+/// events refresh the device list pushed to phones.
 /// </summary>
 internal sealed class DeviceNotificationClient(AudioWorker worker) : IMMNotificationClient
 {
-    public void OnDeviceStateChanged(string deviceId, DeviceState newState) => worker.ScheduleDeviceListRefresh();
+    public void OnDeviceStateChanged(string deviceId, DeviceState newState) => worker.PostDeviceStateChanged(deviceId);
 
-    public void OnDeviceAdded(string pwstrDeviceId) => worker.ScheduleDeviceListRefresh();
+    public void OnDeviceAdded(string pwstrDeviceId) => worker.PostDeviceStateChanged(pwstrDeviceId);
 
-    public void OnDeviceRemoved(string deviceId) => worker.ScheduleDeviceListRefresh();
+    public void OnDeviceRemoved(string deviceId) => worker.PostDeviceStateChanged(deviceId);
 
     public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
     {
