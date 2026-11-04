@@ -30,6 +30,7 @@ public sealed class ServerHost
 
     public ConnectionTracker Connections { get; } = new();
     public MediaService Media { get; } = new();
+    public UserInput Input { get; } = new();
 
     public event Action? LanUrlChanged;
 
@@ -115,9 +116,11 @@ public sealed class ServerHost
         worker.SnapshotRefreshed += s => _ = hub.Clients.All.SendAsync("snapshot", ControlHub.Payload(s, Media));
         Media.Changed += info => _ = hub.Clients.All.SendAsync("mediaChanged", info);
         Media.SessionsChanged += sessions => _ = hub.Clients.All.SendAsync("mediaSessions", sessions);
+        Input.Used += idle => _ = hub.Clients.All.SendAsync("pcInput", idle);
         Connections.CountChanged += count => worker.SetClientCount(count);
 
         _ = Media.StartAsync();
+        _ = Input.RunAsync();
     }
 
     /// <summary>Re-detects the LAN address after a network change; true if it moved.</summary>

@@ -66,5 +66,6 @@ public class ControlHub(AudioWorker worker, MediaService media, ConnectionTracke
         s.Apps,
         Media = media.CurrentWithFreshPosition,
         MediaSessions = media.Sessions,
+        InputIdleSeconds = UserInput.IdleSeconds(),
     };
 }

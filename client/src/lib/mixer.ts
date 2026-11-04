@@ -223,6 +223,9 @@ connection.on('peaks', (frame: PeakFrame) => {
   lastPeakFrame = frame
 })
 
+// the PC's keyboard/mouse in use: the desk monitor's screen follows it, phones don't
+connection.on('pcInput', () => {})
+
 connection.onreconnecting(() => {
   status.value = 'reconnecting'
 })
